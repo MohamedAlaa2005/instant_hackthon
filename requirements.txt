@@ -9,3 +9,5 @@ pydantic>=2.0
 ftfy>=6.0
 pymupdf4llm>=0.0.3
 wordninja>=2.0
+langchain-cohere>=0.3
+langchain-experimental>=0.3

@@ -10,6 +10,8 @@ from src.config import VECTORS_PATH
 from src.indexing.parse import main as run_parse_chunk
 from src.indexing.embeddings import main as run_embeddings
 from src.generation import run_rag
+from src.evaluation import run_evaluation, load_qrels
+from src.evaluation.runner import print_report
 
 
 # ==========================================
@@ -35,6 +37,11 @@ def main():
     parser.add_argument("--index", action="store_true", help="Parse data and generate vector index")
     parser.add_argument("--query", type=str, help="Run RAG query against stored knowledge base")
     parser.add_argument("--top-k", type=int, default=4, help="Number of chunks to retrieve (default: 4)")
+    parser.add_argument("--eval", type=str, nargs="?", const="data/eval/queries.jsonl",
+        metavar="QRELS_PATH",
+        help="Run retrieval evaluation against a qrels JSONL file "
+             "(default: data/eval/queries.jsonl)"
+    )
 
     args = parser.parse_args()
 
@@ -42,6 +49,10 @@ def main():
         index_pipeline()
     elif args.query:
         run_rag(args.query, top_k=args.top_k)
+    elif args.eval:
+        qrels  = load_qrels(args.eval)
+        summary = run_evaluation(qrels, top_k=args.top_k, verbose=True)
+        print_report(summary)
     else:
         # Interactive loop if no flags supplied
         if not os.path.exists(VECTORS_PATH):

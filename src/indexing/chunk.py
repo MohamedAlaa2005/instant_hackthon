@@ -4,19 +4,30 @@ import wordninja
 from langchain_cohere import CohereEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
 
-# 1. Initialize Cohere Embeddings with embed-v4.0
-# Requires COHERE_API_KEY set in environment variables
-embeddings = CohereEmbeddings(
-    model="embed-v4.0",
-    user_agent="semantic-chunking"
-)
+# Module-level references — populated lazily on first use so that:
+#   a) importing this module never crashes due to a missing API key, and
+#   b) clean_text_for_embedding() (no network calls) can be used standalone.
+_embeddings = None
+_semantic_chunker = None
 
-# 2. Initialize the Semantic Chunker
-semantic_chunker = SemanticChunker(
-    embeddings=embeddings,
-    breakpoint_threshold_type="percentile",
-    breakpoint_threshold_amount=95.0,  # Adjust lower (e.g. 80-90) for smaller, more frequent chunks
-)
+
+def _get_chunker():
+    """Lazy-initialize Cohere embeddings + SemanticChunker on first call."""
+    global _embeddings, _semantic_chunker
+    if _semantic_chunker is None:
+        # 1. Initialize Cohere Embeddings with embed-v4.0
+        # Requires COHERE_API_KEY set in environment variables
+        _embeddings = CohereEmbeddings(
+            model="embed-v4.0",
+            user_agent="semantic-chunking"
+        )
+        # 2. Initialize the Semantic Chunker
+        _semantic_chunker = SemanticChunker(
+            embeddings=_embeddings,
+            breakpoint_threshold_type="percentile",
+            breakpoint_threshold_amount=95.0,  # Adjust lower (e.g. 80-90) for smaller, more frequent chunks
+        )
+    return _semantic_chunker
 
 
 def clean_text_for_embedding(text: str) -> str:
@@ -60,7 +71,7 @@ def chunk_text_semantically(text: str) -> list[str]:
         return []
 
     # create_documents returns LangChain Document objects; return page_content strings
-    docs = semantic_chunker.create_documents([cleaned])
+    docs = _get_chunker().create_documents([cleaned])
     return [doc.page_content for doc in docs]
 
 

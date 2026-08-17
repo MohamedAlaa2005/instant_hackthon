@@ -17,4 +17,4 @@ IDS_PATH = EMBEDDINGS_DIR / "ids.json"
 # Models
 EMBEDDING_MODEL = "embed-v4.0"
 EMBEDDING_DIMENSION = 1024
-LLM_MODEL = "gemini-2.5-flash"
+LLM_MODEL = "gemini-3.5-flash-lite"

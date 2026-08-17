@@ -11,7 +11,7 @@ class Gemini:
 
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.5-flash-lite",
         api_key: Optional[str] = None,
         system_instruction: Optional[str] = None,
     ):

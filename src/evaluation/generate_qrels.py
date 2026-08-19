@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from src.config import CHUNKS_PATH, LLM_MODEL
-from src.generation.llm import Gemini
+from src.generation.llm import get_llm
 from src.retriever import retrieve
 
 
@@ -83,7 +83,7 @@ _QUERY_GEN_SYSTEM = (
     "the question mark."
 )
 
-def generate_query(chunk: dict, llm: Gemini, max_retries: int = 3) -> Optional[str]:
+def generate_query(chunk: dict, llm, max_retries: int = 3) -> Optional[str]:
     """Call Gemini to produce a natural-language question for the given chunk."""
     prompt = f"Passage:\n{chunk['text']}\n\nQuestion:"
 
@@ -127,7 +127,7 @@ _JUDGE_SYSTEM = (
 def judge_relevance_pool(
     query: str,
     source_chunk: dict,
-    llm: Gemini,
+    llm,
     pool_size: int = 10,
     max_retries: int = 3,
 ) -> list[str]:
@@ -224,7 +224,7 @@ def main():
     print(f"Generating multi-relevance queries for {len(sample)} chunks (candidate pool: {args.pool_size})…\n")
 
     # --- Initialise LLM ---
-    llm = Gemini(model=LLM_MODEL)
+    llm = get_llm()
 
     # --- Generate, Judge, and Write ---
     out_path = Path(args.out)

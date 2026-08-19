@@ -19,7 +19,6 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from datasets import Dataset
 from langchain_cohere import CohereEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
 from ragas import evaluate
 from ragas.metrics import (
     answer_correctness,
@@ -29,7 +28,7 @@ from ragas.metrics import (
 )
 
 from src.config import CHUNKS_PATH, LLM_MODEL
-from src.generation.llm import Gemini
+from src.generation.llm import get_llm, get_langchain_llm
 from src.retriever import retrieve
 
 
@@ -94,7 +93,7 @@ def generate_rag_response(query: str, top_k: int = 5) -> tuple[str, list[dict]]:
     )
 
     prompt = f"Context:\n{context_str if context_str else 'No relevant context found.'}\n\nUser Question: {query}\n\nAnswer:"
-    llm = Gemini(model=LLM_MODEL, system_instruction=system_instruction)
+    llm = get_llm(system_instruction)
     response = llm.generate(prompt, system_instruction)
     return response, filtered_chunks
 
@@ -178,7 +177,7 @@ def main():
     dataset = Dataset.from_dict(eval_data)
 
     # Initialize Gemini for LLM evaluation and Cohere embed-v4.0 for embedding evaluation
-    evaluator_llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0.0)
+    evaluator_llm = get_langchain_llm(temperature=0.0)
     evaluator_embeddings = CohereEmbeddings(model="embed-v4.0")
 
     print("\nEvaluating with Ragas (Gemini + Cohere embed-v4.0)...")

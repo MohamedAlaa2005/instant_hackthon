@@ -22,8 +22,9 @@ from pathlib import Path
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from src.config import CHUNKS_PATH, EMBEDDING_MODEL, EMBEDDING_DIMENSION
-from src.vector_db.client import get_client, reset
+from src.vector_db.client import get_client
 from src.vector_db.schemas import (
+    contextualize,
     COLLECTION_NAME,
     DISTANCE_METRIC,
     build_where,
@@ -68,7 +69,10 @@ def _embed_batch(client, texts: list[str], input_type: str) -> list[list[float]]
 
 
 def embed_texts(texts: list[str], input_type: str = "search_document") -> list[list[float]]:
-    """Embed a list of texts in batches, returning a flat list of vectors."""
+    """
+    Embed a list of texts, returning a flat list of vectors.
+
+    """
     client = _get_cohere()
     vectors = []
     for start in range(0, len(texts), BATCH_SIZE):
@@ -124,10 +128,18 @@ def build():
     chunks = load_chunks()
     print(f"{len(chunks)} chunks -> {EMBEDDING_MODEL} ({EMBEDDING_DIMENSION}d)")
 
+    # Embed the contextualised form so a passage that never names its own
+    # subject is still reachable; store the raw text, since the generator
+    # should quote the passage rather than the heading glued to it.
     texts = [c["text"] for c in chunks]
-    vectors = embed_texts(texts, input_type="search_document")
+    vectors = embed_texts([contextualize(c) for c in chunks],
+                          input_type="search_document")
 
-    reset()
+    client = get_client()
+    try:
+        client.delete_collection(COLLECTION_NAME)
+    except Exception:
+        pass  # first build for this provider
     collection = get_collection()
 
     ids = [c["id"] for c in chunks]

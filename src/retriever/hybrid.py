@@ -24,19 +24,31 @@ import sys
 from rank_bm25 import BM25Okapi
 
 from src.config import CHUNKS_PATH
+from src.vector_db.schemas import contextualize
 from src.retriever.query_parser import ParsedQuery, parse_query
 from src.retriever.retriever import dense_search
 
 CANDIDATES = 50  # per leg, before fusion
 RRF_K = 60  # damping constant; 60 is the value from the original RRF paper
 
-# Leg weights. Equal weighting measurably hurt paraphrase queries on this
-# corpus - "what should I eat if my liver is fatty" lost its NAFLD answer to
-# BM25 hits that merely shared the words "eat" and "liver". The dense leg is
-# the stronger of the two here, so the lexical leg is kept as a corrective
-# rather than an equal partner.
+# Leg weights, swept over the 35-query set at k=5 after contextual retrieval
+# was added. Every metric declines monotonically as the lexical leg gains
+# weight:
+#
+#   sparse_w   0.00   0.05   0.10   0.15   0.25   0.40   0.60   1.00
+#   MAP@5     0.877  0.868  0.845  0.838  0.816  0.802  0.787  0.769
+#   R@5       0.936  0.929  0.929  0.921  0.890  0.890  0.881  0.836
+#
+# BM25 was added to catch rare clinical tokens - HBsAg, anti-HCV - that
+# embeddings blur. Cohere embed-v4.0 turns out to handle those already, and
+# contextual retrieval closed the remaining gap, so the lexical leg now mostly
+# promotes passages that share ordinary words like "eat" and "liver".
+#
+# 0.0 scored best, but that switches BM25 off entirely and the eval set is only
+# 35 queries - it cannot show what an exact-token query outside that set would
+# do. 0.05 keeps the leg alive as insurance for 0.009 MAP.
 DENSE_WEIGHT = 1.0
-SPARSE_WEIGHT = 0.25
+SPARSE_WEIGHT = 0.05
 
 # Also search the question as the user typed it, alongside the rewrite, and
 # fuse both. Weighted equal to the rewrite: neither wording is reliably better,
@@ -71,7 +83,9 @@ def _load():
     if _bm25 is None:
         with open(CHUNKS_PATH, encoding="utf-8") as fh:
             _chunks = [json.loads(line) for line in fh if line.strip()]
-        _bm25 = BM25Okapi([tokenize(c["text"]) for c in _chunks])
+        # Same contextualised text the embeddings use, so both legs can
+        # find a chunk by its document and section, not only its body.
+        _bm25 = BM25Okapi([tokenize(contextualize(c)) for c in _chunks])
     return _bm25, _chunks
 
 

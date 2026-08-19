@@ -101,15 +101,29 @@ _PROMPT = f"""You prepare patient questions about liver disease for a search eng
 ### Canonical Term Mappings (Preferred Corpus Terms):
 {_CLINICAL_DICT_TEXT}
 
-### Step 1 — Decide whether this input is a searchable medical question.
-Set "needs_retrieval" to false when the input is:
+### Step 1 — Classify the input into exactly one of three intents.
+
+"chitchat" — no health content at all:
 - a greeting or farewell: "hi", "hello", "thanks", "bye"
 - small talk: "how are you", "what's up"
 - a question about you the assistant: "what can you do"
-- anything containing no medical content
 
-When "needs_retrieval" is false, return empty strings for both queries.
-Do NOT invent a medical topic. Do NOT fall back to "liver disease".
+"vague" — the person reports feeling unwell or raises a health concern, but
+names no condition, symptom, test or body system specific enough to search:
+- "i feel sick", "something is wrong with me", "i don't feel right"
+- "i'm worried about my health", "i've been feeling off lately"
+A single named symptom is NOT vague - "my eyes are yellow" is medical.
+
+"medical" — anything answerable from liver-disease material: a condition, a
+symptom, a test, a treatment, diet, screening, or prognosis.
+
+Set "needs_retrieval" true only for "medical". For "chitchat" and "vague"
+return empty strings for both queries - do NOT invent a medical topic, and do
+NOT fall back to "liver disease".
+
+For "vague", also return "clarify": one short question naming two or three
+concrete liver-related symptoms the person could confirm or rule out.
+Leave "clarify" empty for the other two intents.
 
 ### Step 2 — Only when needs_retrieval is true, build the queries.
 - "dense_query": a clinical rephrasing of the user's actual question, one sentence.
@@ -122,21 +136,27 @@ Rules:
 - For terms not in the dictionary, use standard clinical terminology.
 
 ### Output format
-Return ONLY a valid JSON object with exactly three keys:
-needs_retrieval, dense_query, sparse_query.
+Return ONLY a valid JSON object with exactly five keys:
+intent, needs_retrieval, dense_query, sparse_query, clarify.
 
 ### Examples
 Question: hi
-JSON Output: {{"needs_retrieval": false, "dense_query": "", "sparse_query": ""}}
+JSON Output: {{"intent": "chitchat", "needs_retrieval": false, "dense_query": "", "sparse_query": "", "clarify": ""}}
 
 Question: how are you
-JSON Output: {{"needs_retrieval": false, "dense_query": "", "sparse_query": ""}}
+JSON Output: {{"intent": "chitchat", "needs_retrieval": false, "dense_query": "", "sparse_query": "", "clarify": ""}}
+
+Question: i feel sick
+JSON Output: {{"intent": "vague", "needs_retrieval": false, "dense_query": "", "sparse_query": "", "clarify": "Sorry to hear that. Are you noticing anything specific - yellowing of the skin or eyes, pain or swelling in your abdomen, unusual tiredness, or dark urine?"}}
+
+Question: something is wrong with me
+JSON Output: {{"intent": "vague", "needs_retrieval": false, "dense_query": "", "sparse_query": "", "clarify": "I can help with liver-related concerns. Are you experiencing symptoms such as jaundice, abdominal pain or swelling, nausea, or unexplained fatigue?"}}
 
 Question: my eyes went yellow last week
-JSON Output: {{"needs_retrieval": true, "dense_query": "What causes scleral icterus and jaundice in liver disease?", "sparse_query": "jaundice scleral icterus"}}
+JSON Output: {{"intent": "medical", "needs_retrieval": true, "dense_query": "What causes scleral icterus and jaundice in liver disease?", "sparse_query": "jaundice scleral icterus", "clarify": ""}}
 
 Question: is fatty liver reversible
-JSON Output: {{"needs_retrieval": true, "dense_query": "Is hepatic steatosis reversible through treatment or lifestyle modification?", "sparse_query": "hepatic steatosis reversibility treatment"}}
+JSON Output: {{"intent": "medical", "needs_retrieval": true, "dense_query": "Is hepatic steatosis reversible through treatment or lifestyle modification?", "sparse_query": "hepatic steatosis reversibility treatment", "clarify": ""}}
 
 Question: {{query}}
 JSON Output:"""
@@ -158,6 +178,15 @@ class ParsedQuery:
     # retrieval on it. Defaults True so any path that cannot make that
     # judgement (dictionary fallback, no key) still searches as before.
     needs_retrieval: bool = True
+    # "medical" | "vague" | "chitchat". Only "medical" is searchable, but the
+    # other two need different replies: a greeting deserves the scope message,
+    # while someone saying "i feel sick" is raising a health concern and being
+    # handed a menu of topics reads as dismissive. Defaults to "medical" so
+    # every path that cannot classify (dictionary fallback, no key) searches
+    # as before.
+    intent: str = "medical"
+    # For "vague" only: one short question naming concrete symptoms to confirm.
+    clarify: str = ""
 
 
 def expand_clinical_terms(query):
@@ -203,32 +232,16 @@ def bm25_query(query: str) -> str:
 
 
 def _get_client():
-    """
-    Gemini by default; Lightning only if LIGHTNING_API_KEY happens to be set.
-
-    Google's free tier allows 15 requests/minute, which aborts a 35-query
-    benchmark part-way through. Lightning serves the same model without that
-    cap. It is strictly optional - the key lives in .env, which is gitignored,
-    so anyone cloning this repo runs on Gemini with no extra setup and no
-    knowledge of Lightning required.
-
-    Returns (client, kind) where kind is "lightning" or "gemini".
-    """
     global _client
     if _client is None:
-        lightning_key = os.environ.get("LIGHTNING_API_KEY", "")
-        if lightning_key.startswith("sk-lit-"):
-            from src.generation.lightning_llm import LightningLLM
+        key = os.environ.get("GEMINI_API_KEY")
+        if not key or key == "your-key-here":
+            return None
+        from google import genai
 
-            _client = (LightningLLM(api_key=lightning_key), "lightning")
-        else:
-            key = os.environ.get("GEMINI_API_KEY")
-            if not key or key == "your-key-here":
-                return None
-            from google import genai
-
-            _client = (genai.Client(api_key=key), "gemini")
+        _client = genai.Client(api_key=key)
     return _client
+
 
 
 def _retry_delay(exc, attempt):
@@ -252,12 +265,11 @@ def _llm_rewrite(query):
     STRICT_QUERY_REWRITE=1 turns any remaining failure into an exception, so
     a benchmark aborts instead of quietly reporting a degraded run.
     """
-    resolved = _get_client()
-    if resolved is None:
+    client = _get_client()
+    if client is None:
         if STRICT:
-            raise RuntimeError("no LLM key set and STRICT_QUERY_REWRITE=1")
+            raise RuntimeError("GEMINI_API_KEY not set and STRICT_QUERY_REWRITE=1")
         return None
-    client, kind = resolved
 
     last = None
     for attempt in range(MAX_RETRIES):
@@ -268,10 +280,7 @@ def _llm_rewrite(query):
             # '"needs_retrieval"'. That killed every rewrite silently.
             filled = _PROMPT.replace("{query}", query)
 
-            if kind == "lightning":
-                raw = client.chat(filled, temperature=0.0, json_mode=True)
-            else:
-                raw = client.models.generate_content(
+            raw = client.models.generate_content(
                     model=LLM_MODEL,
                     contents=filled,
                     config=types.GenerateContentConfig(
@@ -284,14 +293,16 @@ def _llm_rewrite(query):
             data = json.loads(raw)
             dense = str(data.get("dense_query", "")).strip()
             sparse = str(data.get("sparse_query", "")).strip()
+            intent = str(data.get("intent", "medical")).strip().lower()
+            clarify = str(data.get("clarify", "")).strip()
 
             # An explicit refusal is a valid answer, not a failure. "hi" is
             # meant to come back with both queries empty; treating that as an
             # error sent it to the dictionary and searched the greeting.
             if data.get("needs_retrieval") is False:
-                return "", "", False
+                return "", "", False, intent, clarify
             if dense and sparse:
-                return dense, sparse, True
+                return dense, sparse, True, "medical", ""
             last = ValueError("LLM returned empty dense_query/sparse_query")
         except Exception as exc:
             last = exc
@@ -337,14 +348,18 @@ def parse_query(query, use_llm=True):
 
     rewritten = _llm_rewrite(expanded) if use_llm else None
     if rewritten:
-        dense, sparse, needs_retrieval = rewritten
+        dense, sparse, needs_retrieval, intent, clarify = rewritten
         if not needs_retrieval:
-            # Small talk. Keep the raw text on the object so callers can echo
-            # it, but flag that there is nothing here worth searching for.
+            # Nothing worth searching for. Keep the raw text so callers can
+            # echo it, and carry the intent so they can tell a greeting apart
+            # from someone saying they feel unwell - the two need different
+            # replies.
             parsed = ParsedQuery(query, query, query, applied,
-                                 used_llm=True, needs_retrieval=False)
+                                 used_llm=True, needs_retrieval=False,
+                                 intent=intent, clarify=clarify)
         else:
-            parsed = ParsedQuery(query, dense, sparse, applied, used_llm=True)
+            parsed = ParsedQuery(query, dense, sparse, applied, used_llm=True,
+                                 intent="medical")
     else:
         parsed = ParsedQuery(query, expanded, keywords_only(expanded), applied, used_llm=False)
 

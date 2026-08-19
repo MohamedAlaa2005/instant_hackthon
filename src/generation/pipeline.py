@@ -1,6 +1,6 @@
 import os
 from src.config import LLM_MODEL
-from src.generation.llm import Gemini
+from src.generation.llm import get_llm
 from src.retriever import retrieve
 from src.retriever.query_parser import parse_query
 
@@ -31,17 +31,24 @@ def run_rag(query: str, top_k: int = 5, stream: bool = True):
     print(f"  Dense Query  : {parsed.dense_query}")
     print(f"  Sparse Query : {parsed.sparse_query}")
     print(f"  Expansions   : {parsed.expansions or 'None'}")
+    print(f"  Intent       : {parsed.intent}")
     print(f"  LLM Rewritten: {parsed.used_llm}\n")
 
-    # 2. Greetings and small talk never reach retrieval. Searching them costs
-    #    an embedding and a rerank call to return chunks the model then has to
-    #    decline anyway.
+    # 2. Nothing searchable. Two different reasons need two different replies.
+    #    Searching either costs an embedding and a rerank call to return chunks
+    #    the model then has to decline anyway.
     if not parsed.needs_retrieval:
-        print("Not a medical question - skipping retrieval.")
+        print(f"Intent '{parsed.intent}' - skipping retrieval.")
         print("\n[Answer]:")
-        print("I answer questions about liver disease using NIDDK patient "
-              "information and USPSTF screening guidelines. Ask me about "
-              "symptoms, causes, diagnosis, treatment, diet, or screening.")
+        if parsed.intent == "vague" and parsed.clarify:
+            # Someone reporting they feel unwell has raised a health concern.
+            # Handing them the same capability blurb a greeting gets reads as
+            # dismissive, so ask what they are actually experiencing instead.
+            print(parsed.clarify)
+        else:
+            print("I answer questions about liver disease using NIDDK patient "
+                  "information and USPSTF screening guidelines. Ask me about "
+                  "symptoms, causes, diagnosis, treatment, diet, or screening.")
         return
 
     # 3. Retrieve using the ParsedQuery object
@@ -99,13 +106,7 @@ def run_rag(query: str, top_k: int = 5, stream: bool = True):
 
     prompt = f"Context:\n{context_str if context_str else 'No relevant context found.'}\n\nUser Question: {query}\n\nAnswer:"
 
-    # Lightning is optional: it serves the same model without Google's
-    # 15 req/min free-tier cap. Absent the key, this is plain Gemini.
-    if os.environ.get("LIGHTNING_API_KEY", "").startswith("sk-lit-"):
-        from src.generation.lightning_llm import LightningLLM
-        llm = LightningLLM()
-    else:
-        llm = Gemini(model=LLM_MODEL, system_instruction=system_instruction)
+    llm = get_llm(system_instruction)
 
     print("\n[Gemini Answer]:")
     if stream:

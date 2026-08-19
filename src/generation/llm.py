@@ -80,3 +80,29 @@ class Gemini:
             config=config,
         )
         return response_schema.model_validate_json(response.text)
+
+
+# ---------------------------------------------------------------------------
+# Provider selection
+# ---------------------------------------------------------------------------
+
+def get_llm(system_instruction=None, model=None):
+    """
+    The single place any component asks for an LLM.
+
+    Centralised deliberately: the same construction had started appearing in
+    the parser, the pipeline, the qrels generator and the ragas harness, and
+    they had already drifted apart.
+    """
+    from src.config import LLM_MODEL
+
+    return Gemini(model=model or LLM_MODEL, system_instruction=system_instruction)
+
+
+
+def get_langchain_llm(temperature=0.0):
+    """LangChain-compatible LLM, for ragas."""
+    from src.config import LLM_MODEL
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    return ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=temperature)

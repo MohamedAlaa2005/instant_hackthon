@@ -83,6 +83,45 @@ def extract_clean_markdown_from_pdf(path: str) -> str:
     return "\n".join(markdown_lines)
 
 
+# Section headings used by USPSTF recommendation statements.
+#
+# Font size alone cannot find these. In JAMA's layout the section headings are
+# bold but set at body size, so a size threshold never fires on them, while the
+# slightly larger type in the opening column makes ordinary sentences look like
+# headings: on the hepatitis B statement, 293 of 871 lines were promoted to
+# headings and "Screening Tests" was not one of them. The result was chunks
+# labelled "or other delivery setting." and six consecutive chunks sharing one
+# fragment.
+#
+# Matching an explicit list is unglamorous but exact, and these documents all
+# follow the same template.
+USPSTF_HEADINGS = {
+    "summary of recommendation and evidence", "summary of recommendation",
+    "rationale", "importance", "detection", "uspstf assessment",
+    "benefits of early detection and intervention and treatment",
+    "benefits of early detection and treatment",
+    "benefits of early detection or treatment",
+    "harms of early detection and intervention and treatment",
+    "harms of early detection and treatment",
+    "harms of screening or treatment", "harms of screening and interventions",
+    "benefits of early detection and interventions",
+    "assessment of magnitude of net benefit", "estimate of magnitude of net benefit",
+    "practice considerations", "patient population under consideration",
+    "assessment of risk", "screening tests", "screening intervals",
+    "screening implementation", "treatment", "treatment or interventions",
+    "treatment and interventions", "additional approaches to prevention",
+    "additional tools and resources", "other related uspstf recommendations",
+    "useful resources", "implementation", "discussion", "burden of disease",
+    "scope of review", "accuracy of screening tests",
+    "accuracy of screening tests and risk assessment",
+    "effectiveness of early detection and treatment",
+    "potential harms of screening and treatment",
+    "response to public comment", "research needs and gaps",
+    "recommendations of others", "update of previous uspstf recommendation",
+    "reaffirmation of previous uspstf recommendation", "supporting evidence",
+}
+
+
 def parse_pdf_to_sections(path: str) -> list[dict]:
     """Parse PDF into section blocks using Markdown header hierarchy."""
     md_text = extract_clean_markdown_from_pdf(path)
@@ -96,6 +135,27 @@ def parse_pdf_to_sections(path: str) -> list[dict]:
 
     for line in md_text.split("\n"):
         line_str = line.strip()
+
+        # A known section heading is a heading regardless of what size it was
+        # set in, and a line that only looks like one because of its font is
+        # not: a real heading is short and does not end mid-sentence.
+        bare = line_str.lstrip("#").strip()
+        is_known = bare.lower().rstrip(":") in USPSTF_HEADINGS
+        # A word count alone is not enough: this extraction leaves runs like
+        # "TheUSPSTFrecognizesthatclinicaldecisionsinvolve" glued together, and
+        # those count as a single word while clearly being prose. Length in
+        # characters and a long unbroken letter run catch what word count misses.
+        looks_like_prose = (
+            len(bare.split()) > 8
+            or len(bare) > 60
+            or bool(re.search(r"[A-Za-z]{22,}", bare))
+            or bare.endswith((",", ";", "-"))
+            or (bare and bare[0].islower())
+        )
+        if is_known:
+            line_str = f"## {bare}"
+        elif line_str.startswith("#") and looks_like_prose:
+            line_str = bare  # demote: font size was lying
 
         # Parse Markdown headers (# H1, ## H2, ### H3, etc.)
         if line_str.startswith("#"):

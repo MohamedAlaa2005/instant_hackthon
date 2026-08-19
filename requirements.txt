@@ -17,5 +17,8 @@ langchain-experimental>=0.3
 
 # evaluation
 ragas>=0.4.3
+# ragas 0.4.3 imports langchain_community.chat_models.vertexai, which
+# langchain-community 0.4 removed. Pin below that until ragas catches up.
+langchain-community<0.4
 langchain-google-genai>=2.0.0
 

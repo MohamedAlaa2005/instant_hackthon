@@ -31,7 +31,7 @@ def get_semantic_chunker():
         _semantic_chunker = SemanticChunker(
             embeddings=embeddings,
             breakpoint_threshold_type="percentile",
-            breakpoint_threshold_amount=95.0,
+            breakpoint_threshold_amount=85.0,
         )
     return _semantic_chunker
 

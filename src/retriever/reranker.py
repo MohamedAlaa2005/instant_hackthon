@@ -1,5 +1,5 @@
 """
-Cross-encoder reranking with Cohere rerank-v3.5.
+Cross-encoder reranking.
 
 Retrieval scores a query and a chunk separately and compares the two vectors,
 which is fast enough to run over the whole corpus but throws away any
@@ -8,32 +8,106 @@ together and scores the pair directly. That is far more accurate and far more
 expensive, so it only ever sees the handful of candidates retrieval already
 shortlisted.
 
+Voyage is used when VOYAGE_API_KEY is set, otherwise Cohere. The Cohere trial
+key allows 10 rerank calls/minute, which aborted benchmark runs part-way
+through - 35 queries across several configs exhausts that in seconds.
+
 Usage:  python -m src.retriever.reranker "your question"
 """
 
+import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 
 import cohere
 from dotenv import load_dotenv
 
-MODEL = "rerank-v3.5"
-MAX_RETRIES = 4
+COHERE_MODEL = "rerank-v3.5"
+VOYAGE_MODEL = "rerank-2.5"
+VOYAGE_URL = "https://api.voyageai.com/v1/rerank"
+MAX_RETRIES = 5
+
+# A 429 needs a pause measured in seconds, not the sub-second start of an
+# exponential curve. Waiting the limit out is the whole point now that failure
+# raises instead of silently handing back retrieval order.
+RATE_LIMIT_WAIT = 8
+
+# Minimum gap between calls, enforced before sending rather than after being
+# refused. Reacting to 429s was not enough: successful calls fired back to
+# back, spent the whole per-minute allowance in a few seconds, and then every
+# retry landed inside the same blocked window and the run aborted. Cohere trial
+# keys allow 10 rerank calls/minute, so 6.5s keeps a run under the limit
+# indefinitely. Voyage without billing is 3 RPM - raise this to ~21s for that.
+MIN_INTERVAL = 6.5
+
+_last_call = 0.0
+
+
+def _throttle():
+    """Sleep just long enough to keep calls MIN_INTERVAL apart."""
+    global _last_call
+    wait = MIN_INTERVAL - (time.monotonic() - _last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _last_call = time.monotonic()
 
 load_dotenv()
 
 _client = None
 
 
+class _VoyageReranker:
+    """Minimal Voyage rerank client - one endpoint, no SDK needed."""
+
+    def __init__(self, api_key, model=VOYAGE_MODEL):
+        self.api_key = api_key
+        self.model = model
+
+    def rerank(self, query, documents, top_n, **_):
+        payload = json.dumps({
+            "query": query,
+            "documents": documents,
+            "model": self.model,
+            "top_k": top_n,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            VOYAGE_URL,
+            data=payload,
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = json.loads(response.read())
+
+        # Present Cohere's shape so the caller does not care which ran.
+        return type("Result", (), {"results": [
+            type("Hit", (), {"index": d["index"],
+                             "relevance_score": d["relevance_score"]})()
+            for d in body["data"]
+        ]})()
+
+
 def get_client():
+    """Voyage if its key is present, else Cohere."""
     global _client
     if _client is None:
-        key = os.environ.get("COHERE_API_KEY")
-        if not key:
-            raise SystemExit("COHERE_API_KEY not set - add it to .env")
-        _client = cohere.ClientV2(key)
+        voyage_key = os.environ.get("VOYAGE_API_KEY", "")
+        if voyage_key.startswith("pa-"):
+            _client = _VoyageReranker(voyage_key)
+        else:
+            key = os.environ.get("COHERE_API_KEY")
+            if not key:
+                raise SystemExit("no reranker key - set VOYAGE_API_KEY or COHERE_API_KEY")
+            _client = cohere.ClientV2(key)
     return _client
+
+
+def active_model():
+    client = get_client()
+    return getattr(client, "model", COHERE_MODEL)
 
 
 def rerank(query, hits, top_n=5, client=None):
@@ -60,8 +134,9 @@ def rerank(query, hits, top_n=5, client=None):
 
     for attempt in range(MAX_RETRIES):
         try:
+            _throttle()
             response = client.rerank(
-                model=MODEL,
+                model=getattr(client, "model", COHERE_MODEL),
                 query=query,
                 documents=documents,
                 top_n=min(top_n, len(documents)),
@@ -72,7 +147,11 @@ def rerank(query, hits, top_n=5, client=None):
                 raise RuntimeError(
                     f"rerank failed after {MAX_RETRIES} attempts: {type(exc).__name__}: {exc}"
                 ) from exc
-            time.sleep(2**attempt)
+            is_429 = "429" in str(exc) or "TooManyRequests" in type(exc).__name__
+            wait = RATE_LIMIT_WAIT if is_429 else 2**attempt
+            print(f"  [rerank-retry {attempt + 1}/{MAX_RETRIES}] sleeping {wait}s "
+                  f"({type(exc).__name__})")
+            time.sleep(wait)
 
     ranked = []
     for position, result in enumerate(response.results, 1):

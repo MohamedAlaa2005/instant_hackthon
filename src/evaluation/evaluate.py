@@ -44,6 +44,10 @@ CONFIGS = {
     "hybrid_parse": lambda q, k: _hybrid(q, k, rerank=False, parse=True),
     "hybrid_rerank": lambda q, k: _hybrid(q, k, rerank=True, parse=False),
     "full": lambda q, k: _hybrid(q, k, rerank=True, parse=True),
+    # Same two, but searching only the rewrite - the baseline for whether
+    # also searching the user's own wording is worth an extra embedding.
+    "parse_norawq": lambda q, k: _hybrid(q, k, rerank=False, parse=True, keep_raw=False),
+    "full_norawq": lambda q, k: _hybrid(q, k, rerank=True, parse=True, keep_raw=False),
 }
 
 
@@ -53,10 +57,10 @@ def _dense(query, k):
     return dense_search(query, k=k)
 
 
-def _hybrid(query, k, rerank, parse):
+def _hybrid(query, k, rerank, parse, **kw):
     from src.retriever.hybrid import hybrid_search
 
-    return hybrid_search(query, k=k, rerank=rerank, parse=parse)
+    return hybrid_search(query, k=k, rerank=rerank, parse=parse, **kw)
 
 
 def load_queries(path=QUERIES_PATH, validate=True):

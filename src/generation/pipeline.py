@@ -6,11 +6,22 @@ from src.config import LLM_MODEL
 from src.generation.llm import Gemini
 from src.generation.verifier import verify_generation, VerificationResult
 from src.retriever import retrieve
+from src.retriever.query_parser import parse_query
 
 # Minimum Cohere rerank relevance for a supporting chunk to reach the model.
+# Formally-worded questions score ~0.73, colloquial patient questions
+# ~0.50-0.65, and weak or irrelevant matches < 0.45.
 RELEVANCE_THRESHOLD = 0.45
 
 # The best chunk is always passed through, whatever it scores.
+#
+# Some legitimate questions score below the threshold on every chunk - "my
+# eyes are yellow what does that mean" tops out at 0.307 - and filtering them
+# to nothing answered a real jaundice question with "insufficient
+# information". Small talk is rejected by needs_retrieval before retrieval
+# runs, so the threshold no longer has to double as a scope check; it only has
+# to keep near-misses out of the prompt. The model still declines when the
+# passage does not answer the question, and unlike a number it can read it.
 ALWAYS_KEEP_TOP = 1
 
 
@@ -77,16 +88,39 @@ def run_rag(
     if verbose:
         print(f"\n[Raw Query]: {query}")
 
-    # 1. Retrieve using hybrid search + cross-encoder reranking
+    # 1. Parse and expand query terms
+    parsed = parse_query(query)
+    if verbose:
+        print("\n[Query Parsing Breakdown]:")
+        print(f"  Dense Query  : {parsed.dense_query}")
+        print(f"  Sparse Query : {parsed.sparse_query}")
+        print(f"  Expansions   : {parsed.expansions or 'None'}")
+        print(f"  LLM Rewritten: {parsed.used_llm}\n")
+
+    # 2. Greetings and small talk never reach retrieval. Searching them costs
+    #    an embedding and a rerank call to return chunks the model then has to
+    #    decline anyway.
+    if not parsed.needs_retrieval:
+        refusal_text = (
+            "I answer questions about liver disease using NIDDK patient "
+            "information and USPSTF screening guidelines. Ask me about "
+            "symptoms, causes, diagnosis, treatment, diet, or screening."
+        )
+        if verbose:
+            print("Not a medical question - skipping retrieval.")
+            print(f"\n[Answer]:\n{refusal_text}\n")
+        return refusal_text, None
+
+    # 3. Retrieve using the ParsedQuery object
     if verbose:
         print(f"Retrieving top {top_k} contexts...")
-    retrieved_chunks = retrieve(query, top_k=top_k)
+    retrieved_chunks = retrieve(parsed, top_k=top_k)
 
-    # 2. Drop weakly-relevant chunks using rerank score threshold
+    # 4. Drop weak matches, but never drop the best one - see ALWAYS_KEEP_TOP.
     if retrieved_chunks and "rerank_score" in retrieved_chunks[0]:
         filtered_chunks = [
             c for i, c in enumerate(retrieved_chunks)
-            if i < ALWAYS_KEEP_TOP or c["rerank_score"] >= RELEVANCE_THRESHOLD
+            if i < ALWAYS_KEEP_TOP or c.get("rerank_score", 0.0) >= RELEVANCE_THRESHOLD
         ]
         if verbose:
             print(
@@ -99,7 +133,15 @@ def run_rag(
         if verbose:
             print(f"Retrieved {len(retrieved_chunks)} chunks; filter skipped.")
 
-    # 3. Build context block
+    # If no relevant chunks found after thresholding, return early
+    if not filtered_chunks:
+        refusal_text = "The provided context does not contain sufficient information to answer this query."
+        if verbose:
+            print("\n[Gemini Answer]:")
+            print(f"{refusal_text}\n")
+        return refusal_text, None
+
+    # 5. Build context block
     context_blocks = []
     for i, c in enumerate(filtered_chunks, 1):
         context_blocks.append(
@@ -121,12 +163,18 @@ def run_rag(
         f"Answer:"
     )
 
-    llm = Gemini(model=LLM_MODEL, system_instruction=system_instruction)
+    # Lightning is optional: it serves the same model without Google's
+    # 15 req/min free-tier cap. Absent the key, this is plain Gemini.
+    if os.environ.get("LIGHTNING_API_KEY", "").startswith("sk-lit-"):
+        from src.generation.lightning_llm import LightningLLM
+        llm = LightningLLM()
+    else:
+        llm = Gemini(model=LLM_MODEL, system_instruction=system_instruction)
 
-    # 4. Generate candidate response
+    # 6. Generate candidate response
     candidate_response = llm.generate(prompt, system_instruction)
 
-    # 5. Post-Generation Verification
+    # 7. Post-Generation Verification
     verification: Optional[VerificationResult] = None
     final_output = candidate_response
 
@@ -143,7 +191,11 @@ def run_rag(
 
             # If the candidate output hallucinated or fabricated citations, decline safely
             if verification.verdict == "FAILED":
-                issues_summary = "; ".join(verification.flagged_issues) if verification.flagged_issues else "Ungrounded medical claims or invalid citations detected."
+                issues_summary = (
+                    "; ".join(verification.flagged_issues)
+                    if verification.flagged_issues
+                    else "Ungrounded medical claims or invalid citations detected."
+                )
                 final_output = (
                     "Answer: I cannot provide an answer based on the retrieved evidence.\n\n"
                     f"Refusal Reason: Verification check failed ({issues_summary}).\n\n"

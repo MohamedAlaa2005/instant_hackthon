@@ -1,15 +1,91 @@
 import json
 import os
 import re
-import pymupdf4llm
 
+import fitz  # PyMuPDF
 from src.config import RAW_DIR, CHUNKS_PATH as OUT_PATH
 from src.indexing.chunk import clean_text_for_embedding, chunk_text_semantically
 
 
+def extract_clean_markdown_from_pdf(path: str) -> str:
+    """
+    Extracts PDF text block-by-block, repairing missing spaces between words using
+    bounding-box coordinates (x0/x1 gap detection) and converting headings to Markdown.
+    """
+    doc = fitz.open(path)
+    font_sizes = []
+
+    # Pass 1: Gather font size distribution to identify body text size
+    for page in doc:
+        blocks = page.get_text("dict").get("blocks", [])
+        for block in blocks:
+            if block.get("type") == 0:  # Text block
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("text", "").strip():
+                            font_sizes.append(round(span["size"], 1))
+
+    body_size = max(set(font_sizes), key=font_sizes.count) if font_sizes else 10.0
+
+    # Pass 2: Reconstruct text with physical bounding-box gap detection
+    markdown_lines = []
+    for page in doc:
+        blocks = page.get_text("dict").get("blocks", [])
+        for block in blocks:
+            if block.get("type") == 0:
+                for line in block.get("lines", []):
+                    line_parts = []
+                    line_max_size = 0.0
+                    is_bold = False
+                    spans = line.get("spans", [])
+
+                    for i, span in enumerate(spans):
+                        text = span.get("text", "")
+                        if not text:
+                            continue
+
+                        size = span.get("size", body_size)
+                        if size > line_max_size:
+                            line_max_size = size
+
+                        font_name = span.get("font", "").lower()
+                        if span.get("flags", 0) & 2 or "bold" in font_name:
+                            is_bold = True
+
+                        # Fix missing spaces: Calculate horizontal gap between current and previous span
+                        if i > 0:
+                            prev_span = spans[i - 1]
+                            gap = span["bbox"][0] - prev_span["bbox"][2]  # start_x - end_x
+                            if gap > 1.0 and not line_parts[-1].endswith(" ") and not text.startswith(" "):
+                                line_parts.append(" ")
+
+                        line_parts.append(text)
+
+                    full_line = "".join(line_parts).strip()
+                    if not full_line:
+                        continue
+
+                    # Assign Markdown headers based on relative font size
+                    if line_max_size >= body_size * 1.4:
+                        markdown_lines.append(f"# {full_line}")
+                    elif line_max_size >= body_size * 1.2:
+                        markdown_lines.append(f"## {full_line}")
+                    elif line_max_size >= body_size * 1.1 and is_bold:
+                        markdown_lines.append(f"### {full_line}")
+                    elif full_line.startswith("#"):
+                        markdown_lines.append(full_line)
+                    else:
+                        markdown_lines.append(full_line)
+
+                markdown_lines.append("")  # Block separator
+
+    doc.close()
+    return "\n".join(markdown_lines)
+
+
 def parse_pdf_to_sections(path: str) -> list[dict]:
     """Parse PDF into section blocks using Markdown header hierarchy."""
-    md_text = pymupdf4llm.to_markdown(path)
+    md_text = extract_clean_markdown_from_pdf(path)
 
     sections = []
     header_stack = {}  # Tracks level (int) -> heading title (str)

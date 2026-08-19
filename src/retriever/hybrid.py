@@ -24,7 +24,7 @@ import sys
 from rank_bm25 import BM25Okapi
 
 from src.config import CHUNKS_PATH
-from src.retriever.query_parser import expand_clinical_terms, keywords_only
+from src.retriever.query_parser import ParsedQuery, parse_query
 from src.retriever.retriever import dense_search
 
 CANDIDATES = 50  # per leg, before fusion
@@ -37,6 +37,12 @@ RRF_K = 60  # damping constant; 60 is the value from the original RRF paper
 # rather than an equal partner.
 DENSE_WEIGHT = 1.0
 SPARSE_WEIGHT = 0.25
+
+# Also search the question as the user typed it, alongside the rewrite, and
+# fuse both. Weighted equal to the rewrite: neither wording is reliably better,
+# and the point is that a poor rewrite can no longer throw away a good match.
+KEEP_RAW_QUERY = True
+RAW_WEIGHT = 1.0
 
 # How many fused candidates go to the reranker. More is better for recall but
 # costs latency and API quota; the reranker cuts this down to k.
@@ -111,6 +117,9 @@ def hybrid_search(
     dense_weight=DENSE_WEIGHT,
     sparse_weight=SPARSE_WEIGHT,
     rerank=False,
+    parse=True,
+    keep_raw=KEEP_RAW_QUERY,
+    raw_weight=RAW_WEIGHT,
 ):
     """
     Run both legs and fuse by weighted reciprocal rank.
@@ -118,27 +127,52 @@ def hybrid_search(
     Returns up to `k` hits sorted by fused score, each annotated with whichever
     of `dense_rank` / `bm25_rank` it earned, so you can see which leg found it.
 
-    The dense leg receives the original query (with clinical term expansions
-    appended). The BM25 leg receives the same expanded text with stopwords
-    stripped — no LLM rewriting needed.
+    `query` may be a string or an already-built ParsedQuery. With `parse=True`
+    a string is run through the query parser first, so each leg receives the
+    form it wants; `parse=False` sends the raw string to both.
 
     With `rerank=True` the fused list is widened to RERANK_CANDIDATES and
-    handed to the cross-encoder, which picks the final k.
+    handed to the cross-encoder, which picks the final k. Fusion then only has
+    to get the right chunk somewhere into the shortlist rather than at the top,
+    so the exact leg weights matter much less.
     """
-    # Expand clinical synonyms once; dense gets expanded prose, BM25 gets keywords.
-    expanded, _ = expand_clinical_terms(query if isinstance(query, str) else query)
-    dense_q = expanded
-    sparse_q = keywords_only(expanded)
+    if isinstance(query, ParsedQuery):
+        parsed = query
+    elif parse:
+        parsed = parse_query(query)
+    else:
+        parsed = ParsedQuery(raw=query, dense_query=query, sparse_query=query)
 
     dense = dense_search(
-        dense_q, k=candidates, corpus=corpus, topic=topic, section=section
+        parsed.dense_query, k=candidates, corpus=corpus, topic=topic, section=section
     )
     sparse = sparse_search(
-        sparse_q, k=candidates, corpus=corpus, topic=topic, section=section
+        parsed.sparse_query, k=candidates, corpus=corpus, topic=topic, section=section
     )
+    legs = [(dense, dense_weight), (sparse, sparse_weight)]
+
+    # Search the user's own wording too, not just the rewrite.
+    #
+    # The rewrite replaces the question, and on this corpus that loses ground:
+    # the headings are already plain patient questions ("How can my diet help
+    # prevent or treat NAFLD?"), so "what should i eat if my liver is fatty"
+    # starts closer to the answer than "dietary guidelines for NAFLD" does.
+    # Measured at k=5, rewriting cost 0.055 MAP against not rewriting, and raw
+    # dense search beat every config that touched the query. Keeping the
+    # original as a third leg means a bad rewrite can no longer discard the
+    # good match - it costs one extra embedding, and BM25 is local.
+    if keep_raw and parsed.used_llm and parsed.raw.strip() != parsed.dense_query.strip():
+        legs.append((
+            dense_search(parsed.raw, k=candidates, corpus=corpus, topic=topic, section=section),
+            raw_weight,
+        ))
+        legs.append((
+            sparse_search(parsed.raw, k=candidates, corpus=corpus, topic=topic, section=section),
+            raw_weight * sparse_weight,
+        ))
 
     fused = {}
-    for hits, weight in ((dense, dense_weight), (sparse, sparse_weight)):
+    for hits, weight in legs:
         for rank, hit in enumerate(hits, 1):
             entry = fused.setdefault(hit["id"], dict(hit))
             entry.update({key: value for key, value in hit.items() if key != "score"})
@@ -153,7 +187,10 @@ def hybrid_search(
     if rerank:
         from src.retriever.reranker import rerank as _rerank
 
-        return _rerank(query if isinstance(query, str) else str(query), ranked[:RERANK_CANDIDATES], top_n=k)
+        # Reranked against the user's actual question, not the rewrite. The
+        # cross-encoder is the last stage that can correct a bad rewrite, so
+        # feeding it the rewrite would compound the error instead.
+        return _rerank(parsed.raw, ranked[:RERANK_CANDIDATES], top_n=k)
     return ranked[:k]
 
 

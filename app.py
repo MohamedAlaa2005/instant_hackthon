@@ -34,14 +34,17 @@ def main():
     parser = argparse.ArgumentParser(description="End-to-End RAG System with Gemini & Cohere")
     parser.add_argument("--index", action="store_true", help="Parse data and generate vector index")
     parser.add_argument("--query", type=str, help="Run RAG query against stored knowledge base")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve (default: 4)")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve (default: 5)")
+    parser.add_argument("--no-verify", action="store_true", help="Skip post-generation verification audit")
 
     args = parser.parse_args()
+
+    verify_enabled = not args.no_verify
 
     if args.index:
         index_pipeline()
     elif args.query:
-        run_rag(args.query, top_k=args.top_k)
+        run_rag(args.query, top_k=args.top_k, verify=verify_enabled)
     else:
         # Interactive loop if no flags supplied
         if get_collection().count() == 0:
@@ -56,7 +59,7 @@ def main():
                     continue
                 if user_input.lower() in ("exit", "quit"):
                     break
-                run_rag(user_input, top_k=args.top_k)
+                run_rag(user_input, top_k=args.top_k, verify=verify_enabled)
             except KeyboardInterrupt:
                 break
 

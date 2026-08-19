@@ -1,5 +1,17 @@
+import logging
 import os
+import warnings
 from typing import Generator, Optional, Type
+
+# Suppress Google GenAI SDK's Automatic Function Calling (AFC) advisory logs and warnings
+logging.getLogger("google_genai").setLevel(logging.ERROR)
+logging.getLogger("google").setLevel(logging.ERROR)
+
+warnings.filterwarnings(
+    "ignore",
+    message=".*(Automatic function calling|AFC|direct use of AFC).*",
+    category=UserWarning,
+)
 
 from google import genai
 from google.genai import types
